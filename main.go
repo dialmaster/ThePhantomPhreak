@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	irc "github.com/thoj/go-ircevent"
 )
@@ -18,7 +22,33 @@ const (
 	prompt     = "ThePhantomPhreak: "
 )
 
+type conf struct {
+	ApiKey string `yaml:"ApiKey"`
+}
+
+func (c *conf) getConf() *conf {
+	myConfigFile := "config.yml"
+	if _, err := os.Stat("config.yml"); err == nil {
+		myConfigFile = "config.yml"
+	}
+
+	yamlFile, err := ioutil.ReadFile(myConfigFile)
+	if err != nil {
+		log.Printf("yamlFile.Get err   #%v ", err)
+	}
+	err = yaml.Unmarshal(yamlFile, c)
+	if err != nil {
+		log.Fatalf("Unmarshal: %v", err)
+	}
+
+	return c
+}
+
+var c conf
+
 func main() {
+	c.getConf()
+
 	conn := irc.IRC("ThePhantomPhreak", "ThePhantomPhreak")
 	err := conn.Connect("irc3.nerdbucket.com:6670")
 	conn.UseTLS = true
@@ -48,8 +78,7 @@ func main() {
 	conn.Loop()
 }
 
-// This API key is tied to grant.s.dial@gmail.com account and will expire on June 1st, 2023
-// API Key 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
+// The api key in config.yml to grant.s.dial@gmail.com account and will expire on June 1st, 2023
 func chatgptResponse(input string) (string, error) {
 	data := map[string]interface{}{
 		"prompt":      input + " Write the response as if you were a snarky teenage hacker.",
@@ -67,7 +96,7 @@ func chatgptResponse(input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer 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")
+	req.Header.Set("Authorization", "Bearer "+c.ApiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -89,6 +118,8 @@ func chatgptResponse(input string) (string, error) {
 		fmt.Println("Error 4")
 		return "", err
 	}
+	// Print debug info for response
+	fmt.Printf("%+v\n", response)
 	var text = response.Choices[0].Text
 	fmt.Println(text)
 	return response.Choices[0].Text, nil
