@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -17,13 +18,17 @@ import (
 )
 
 const (
-	//chatgptURL = "https://api.openai.com/v1/engines/chat-davinci/messages"
 	chatgptURL = "https://api.openai.com/v1/completions"
-	prompt     = "ThePhantomPhreak: "
 )
 
 type conf struct {
-	ApiKey string `yaml:"ApiKey"`
+	ApiKey     string `yaml:"ApiKey"`
+	BotContext string `yaml:"BotContext"`
+	MemorySize int    `yaml:"MemorySize"`
+	IrcServer  string `yaml:"IrcServer"`
+	IrcPort    string `yaml:"IrcPort"`
+	ChatRoom   string `yaml:"ChatRoom"`
+	BotName    string `yaml:"BotName"`
 }
 
 func (c *conf) getConf() *conf {
@@ -45,12 +50,13 @@ func (c *conf) getConf() *conf {
 }
 
 var c conf
+var prevMsgs []string
 
 func main() {
 	c.getConf()
 
-	conn := irc.IRC("ThePhantomPhreak", "ThePhantomPhreak")
-	err := conn.Connect("irc3.nerdbucket.com:6670")
+	conn := irc.IRC(c.BotName, c.BotName)
+	err := conn.Connect(c.IrcServer + ":" + c.IrcPort)
 	conn.UseTLS = true
 	conn.TLSConfig = &tls.Config{
 		InsecureSkipVerify: true,
@@ -60,11 +66,16 @@ func main() {
 		return
 	}
 	conn.AddCallback("001", func(event *irc.Event) {
-		conn.Join("#nogoodshits")
+		conn.Join(c.ChatRoom)
 	})
 	conn.AddCallback("PRIVMSG", func(event *irc.Event) {
-		if strings.HasPrefix(event.Message(), prompt) {
-			input := strings.TrimPrefix(event.Message(), prompt)
+		if strings.HasPrefix(event.Message(), c.BotName+": ") || rand.Intn(15) == 0 {
+			inputPrime := c.BotContext
+			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
+			input := inputPrime + strings.Join(prevMsgs, "\n")
+			input += "\n" + c.BotName + ": "
+			// print debug info for input
+			fmt.Println(input)
 			response, err := chatgptResponse(input)
 			if err != nil {
 				fmt.Println("Error getting chatgpt response:", err)
@@ -72,7 +83,14 @@ func main() {
 			}
 			// Strip line breaks from response
 			response = strings.ReplaceAll(response, "\n", "")
-			conn.Privmsg("#nogoodshits", response)
+			// Strip leading spaces from response
+			response = strings.TrimLeft(response, " ")
+			conn.Privmsg(c.ChatRoom, response)
+			prevMsgs = append(prevMsgs, c.BotName+": "+response)
+		}
+		// if prevMgs is longer than memory buffer, remove the first element (limited memory)
+		if len(prevMsgs) > c.MemorySize {
+			prevMsgs = prevMsgs[1:]
 		}
 	})
 	conn.Loop()
@@ -81,7 +99,7 @@ func main() {
 // The api key in config.yml to grant.s.dial@gmail.com account and will expire on June 1st, 2023
 func chatgptResponse(input string) (string, error) {
 	data := map[string]interface{}{
-		"prompt":      input + " Write the response as if you were a snarky teenage hacker.",
+		"prompt":      input,
 		"max_tokens":  100,
 		"temperature": 0.5,
 		"model":       "text-davinci-003",
@@ -107,7 +125,6 @@ func chatgptResponse(input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("%+v\n", body)
 	var response struct {
 		Choices []struct {
 			Text string `json:"text"`

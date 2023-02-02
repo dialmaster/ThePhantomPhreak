@@ -1,0 +1,9 @@
+# Update this file with your own settings, and then copy it to config.yml in order to run this bot.
+# Get an apikey from openai
+ApiKey: ""
+BotContext: "SillyBot is real comedian who is really friendly:\n\n"
+MemorySize: 25
+IrcServer: "irc3.someserver.com"
+IrcPort: "6670"
+ChatRoom: "#awesomechatroom"
+BotName: "SillyBot"
