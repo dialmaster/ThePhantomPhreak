@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -85,6 +86,8 @@ func main() {
 			response = strings.ReplaceAll(response, "\n", "")
 			// Strip leading spaces from response
 			response = strings.TrimLeft(response, " ")
+			// Add a random delay between 1 and 3 seconds before sending response
+			time.Sleep(time.Duration(rand.Intn(3)+1) * time.Second)
 			conn.Privmsg(c.ChatRoom, response)
 			prevMsgs = append(prevMsgs, c.BotName+": "+response)
 		}
