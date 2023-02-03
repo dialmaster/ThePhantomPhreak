@@ -70,7 +70,7 @@ func main() {
 		conn.Join(c.ChatRoom)
 	})
 	conn.AddCallback("PRIVMSG", func(event *irc.Event) {
-		if strings.HasPrefix(event.Message(), c.BotName+": ") || rand.Intn(15) == 0 {
+		if strings.HasPrefix(event.Message(), c.BotName+", ") || strings.HasPrefix(event.Message(), c.BotName+": ") || rand.Intn(30) == 0 {
 			inputPrime := c.BotContext
 			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
 			input := inputPrime + strings.Join(prevMsgs, "\n")
@@ -90,6 +90,8 @@ func main() {
 			time.Sleep(time.Duration(rand.Intn(3)+1) * time.Second)
 			conn.Privmsg(c.ChatRoom, response)
 			prevMsgs = append(prevMsgs, c.BotName+": "+response)
+		} else {
+			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
 		}
 		// if prevMgs is longer than memory buffer, remove the first element (limited memory)
 		if len(prevMsgs) > c.MemorySize {
