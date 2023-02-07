@@ -140,6 +140,10 @@ func chatgptResponse(input string) (string, error) {
 		fmt.Println("Error 4")
 		return "", err
 	}
+	if len(response.Choices) == 0 {
+		fmt.Println("Error 5")
+		return "", fmt.Errorf("no response from chatgpt")
+	}
 	// Print debug info for response
 	fmt.Printf("%+v\n", response)
 	var text = response.Choices[0].Text
