@@ -69,6 +69,16 @@ func main() {
 	conn.AddCallback("001", func(event *irc.Event) {
 		conn.Join(c.ChatRoom)
 	})
+	conn.AddCallback("KICK", func(event *irc.Event) {
+		if event.Arguments[1] == c.BotName {
+			// Wait 15 seconds before rejoining
+			time.Sleep(5 * time.Second)
+			// Clear the contents of prevMsgs
+			prevMsgs = []string{}
+			conn.Join(c.ChatRoom)
+			conn.Privmsg(c.ChatRoom, "I was kicked from the room. My memory has been cleared.")
+		}
+	})
 	conn.AddCallback("PRIVMSG", func(event *irc.Event) {
 		if strings.HasPrefix(event.Message(), c.BotName+", ") || strings.HasPrefix(event.Message(), c.BotName+": ") || rand.Intn(30) == 0 {
 			inputPrime := c.BotContext
@@ -82,14 +92,26 @@ func main() {
 				fmt.Println("Error getting chatgpt response:", err)
 				return
 			}
-			// Strip line breaks from response
-			response = strings.ReplaceAll(response, "\n", "")
-			// Strip leading spaces from response
-			response = strings.TrimLeft(response, " ")
-			// Add a random delay between 1 and 3 seconds before sending response
-			time.Sleep(time.Duration(rand.Intn(3)+1) * time.Second)
-			conn.Privmsg(c.ChatRoom, response)
-			prevMsgs = append(prevMsgs, c.BotName+": "+response)
+
+			// Break response on line break
+			responses := strings.Split(response, "\n")
+
+			for _, line := range responses {
+				if line != "" {
+					// Strip leading spaces from response
+					line = strings.TrimLeft(line, " ")
+					// If the line begins with the bot name, remove it
+					if strings.HasPrefix(line, c.BotName+": ") {
+						line = strings.TrimPrefix(line, c.BotName+": ")
+					}
+
+					// Add a random delay between 0 and 2 seconds before sending response
+					time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+					conn.Privmsg(c.ChatRoom, line)
+					prevMsgs = append(prevMsgs, c.BotName+": "+line)
+				}
+			}
+
 		} else {
 			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
 		}
