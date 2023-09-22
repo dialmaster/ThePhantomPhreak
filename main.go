@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -19,17 +18,18 @@ import (
 )
 
 const (
-	chatgptURL = "https://api.openai.com/v1/completions"
+	chatgptURL = "https://api.openai.com/v1/chat/completions"
 )
 
 type conf struct {
-	ApiKey     string `yaml:"ApiKey"`
-	BotContext string `yaml:"BotContext"`
-	MemorySize int    `yaml:"MemorySize"`
-	IrcServer  string `yaml:"IrcServer"`
-	IrcPort    string `yaml:"IrcPort"`
-	ChatRoom   string `yaml:"ChatRoom"`
-	BotName    string `yaml:"BotName"`
+	ApiKey             string `yaml:"ApiKey"`
+	BotContext         string `yaml:"BotContext"`
+	MemorySize         int    `yaml:"MemorySize"`
+	IrcServer          string `yaml:"IrcServer"`
+	IrcPort            string `yaml:"IrcPort"`
+	ChatRoom           string `yaml:"ChatRoom"`
+	BotName            string `yaml:"BotName"`
+	OpenAIOrganization string `yaml:"OpenAI-Organization"`
 }
 
 func (c *conf) getConf() *conf {
@@ -73,6 +73,7 @@ func main() {
 		if event.Arguments[1] == c.BotName {
 			// Wait 15 seconds before rejoining
 			time.Sleep(5 * time.Second)
+			c.getConf()
 			// Clear the contents of prevMsgs
 			prevMsgs = []string{}
 			conn.Join(c.ChatRoom)
@@ -80,21 +81,27 @@ func main() {
 		}
 	})
 	conn.AddCallback("PRIVMSG", func(event *irc.Event) {
-		if strings.HasPrefix(event.Message(), c.BotName+", ") || strings.HasPrefix(event.Message(), c.BotName+": ") || rand.Intn(30) == 0 {
-			inputPrime := c.BotContext
+		checkMsgs := append(prevMsgs, event.Nick+": "+event.Message())
+		shouldIRespond := shouldIRespond(checkMsgs)
+
+		if shouldIRespond {
 			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
-			input := inputPrime + strings.Join(prevMsgs, "\n")
+			input := strings.Join(prevMsgs, "\n")
 			input += "\n" + c.BotName + ": "
-			// print debug info for input
-			fmt.Println(input)
-			response, err := chatgptResponse(input)
+			fmt.Println("Input for response:", input)
+			fmt.Println("")
+
+			// More expensive, more accurate
+			//response, err := chatgptResponse(c.BotContext, input, "gpt-4")
+
+			// Less expensive
+			response, err := chatgptResponse(c.BotContext, input, "gpt-3.5-turbo")
 			if err != nil {
 				fmt.Println("Error getting chatgpt response:", err)
 				return
 			}
 
 			// Break response on line break
-			// Test comment
 			responses := strings.Split(response, "\n")
 
 			for _, line := range responses {
@@ -107,9 +114,30 @@ func main() {
 					}
 
 					// Add a random delay between 0 and 2 seconds before sending response
-					time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
-					conn.Privmsg(c.ChatRoom, line)
-					prevMsgs = append(prevMsgs, c.BotName+": "+line)
+					// time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+
+					// If line is > 384 characters, split it into multiple messages on word boundaries
+					if len(line) > 384 {
+						words := strings.Split(line, " ")
+						var msg string
+						for _, word := range words {
+							if len(msg)+len(word) > 384 {
+								conn.Privmsg(c.ChatRoom, msg)
+								prevMsgs = append(prevMsgs, c.BotName+": "+msg)
+								msg = word + " "
+							} else {
+								msg += word + " "
+							}
+						}
+						// Send the remaining part of the message, if there is any.
+						if msg != "" {
+							conn.Privmsg(c.ChatRoom, msg)
+							prevMsgs = append(prevMsgs, c.BotName+": "+msg)
+						}
+					} else {
+						conn.Privmsg(c.ChatRoom, line)
+						prevMsgs = append(prevMsgs, c.BotName+": "+line)
+					}
 				}
 			}
 
@@ -124,52 +152,139 @@ func main() {
 	conn.Loop()
 }
 
-// The api key in config.yml to grant.s.dial@gmail.com account and will expire on June 1st, 2023
-func chatgptResponse(input string) (string, error) {
-	data := map[string]interface{}{
-		"prompt":      input,
-		"max_tokens":  100,
-		"temperature": 0.5,
-		"model":       "text-davinci-003",
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+/**
+ * Should I respond to the last messages in the stream?
+ * This will use the cheaper version of GPT-3.5 to determine if I should respond
+ * @param input The input JSON string, containing the last 5 messages in the stream
+ * @return true if I should respond, false otherwise
+ */
+func shouldIRespond(checkMsgs []string) bool {
+	numMsgs := len(checkMsgs)
+	numToJoin := 5
+	if numMsgs < 5 {
+		numToJoin = numMsgs
 	}
+
+	lastMsgs := strings.Join(checkMsgs[numMsgs-numToJoin:], "\n")
+	fmt.Println("Checking to see if I should respond to:", lastMsgs)
+	fmt.Println("")
+
+	roleText := `You are ` + c.BotName + `, a participant in a chat room.
+	Based on the following series of messages, give me a boolean indicating if you SHOULD respond to the last message in the stream.
+	If your name was mentioned, but it seems like you should not respond based on context, return false.
+	Give the a response in JSON format like follows:
+	{ shouldRespond: boolean, respondReason: string }
+
+	shouldRespond is the boolean that indicates if ` + c.BotName + ` should respond.
+	respondReason is the reasoning behind the boolean.`
+
+	jsonResponse, err1 := chatgptResponse(roleText, lastMsgs, "gpt-3.5-turbo")
+	if err1 != nil {
+		fmt.Println("Error getting chatgpt response in shouldIRespond:", err1)
+		return false
+	}
+
+	// Debug print the jsonResponse variable
+	fmt.Println("Should I respond?", jsonResponse)
+	fmt.Println("")
+
+	// Try to evaluate the jsonResponse variable as a JSON object
+	var response map[string]interface{}
+
+	err := json.Unmarshal([]byte(jsonResponse), &response)
+	if err != nil {
+		fmt.Println("Error in unmarshalling response for shouldIRespond")
+		return false
+	}
+
+	return response["shouldRespond"].(bool)
+}
+
+// The api key in config.yml to grant.s.dial@gmail.com account and will expire on June 1st, 2023
+func chatgptResponse(roleText string, input string, model string) (string, error) {
+	data := map[string]interface{}{
+		"model": "gpt-4",
+		"messages": []Message{
+			{
+				Role:    "system",
+				Content: roleText,
+			},
+			{
+				Role:    "user",
+				Content: input,
+			},
+		},
+	}
+
 	payload, err := json.Marshal(data)
+
 	if err != nil {
 		fmt.Println("Error 1")
 		return "", err
 	}
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
 	req, err := http.NewRequest("POST", chatgptURL, bytes.NewBuffer(payload))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.ApiKey)
+	req.Header.Set("OpenAI-Organization", c.OpenAIOrganization)
 	req.Header.Set("Content-Type", "application/json")
+
+	var response struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int    `json:"created"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("received non-200 response: %s", resp.Status)
+	}
+
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	var response struct {
-		Choices []struct {
-			Text string `json:"text"`
-		} `json:"choices"`
-	}
 	err = json.Unmarshal(body, &response)
 	if err != nil {
-		fmt.Println("Error 4")
+		fmt.Println("Error in unmarshalling response")
 		return "", err
 	}
-	if len(response.Choices) == 0 {
-		fmt.Println("Error 5")
+
+	if len(response.Choices) == 0 || response.Choices[0].Message.Role != "assistant" {
+		fmt.Println("Error: No assistant message in response")
 		return "", fmt.Errorf("no response from chatgpt")
 	}
+
 	// Print debug info for response
-	fmt.Printf("%+v\n", response)
-	var text = response.Choices[0].Text
-	fmt.Println(text)
-	return response.Choices[0].Text, nil
+	fmt.Printf("ChatGPT response: %+v\n", response)
+	text := response.Choices[0].Message.Content
+
+	return text, nil
 }
