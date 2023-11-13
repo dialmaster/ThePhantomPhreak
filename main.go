@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,14 +24,17 @@ const (
 )
 
 type conf struct {
-	ApiKey             string `yaml:"ApiKey"`
-	BotContext         string `yaml:"BotContext"`
-	MemorySize         int    `yaml:"MemorySize"`
-	IrcServer          string `yaml:"IrcServer"`
-	IrcPort            string `yaml:"IrcPort"`
-	ChatRoom           string `yaml:"ChatRoom"`
-	BotName            string `yaml:"BotName"`
-	OpenAIOrganization string `yaml:"OpenAI-Organization"`
+	ApiKey                               string `yaml:"ApiKey"`
+	BotContext                           string `yaml:"BotContext"`
+	MemorySize                           int    `yaml:"MemorySize"`
+	IrcServer                            string `yaml:"IrcServer"`
+	IrcPort                              string `yaml:"IrcPort"`
+	ChatRoom                             string `yaml:"ChatRoom"`
+	BotName                              string `yaml:"BotName"`
+	OpenAIOrganization                   string `yaml:"OpenAI-Organization"`
+	ContextLinesForResponseDetermination int    `yaml:"ContextLinesForResponseDetermination"`
+	ResponseGPTModel                     string `yaml:"ResponseGPTModel"`
+	ShouldRespondGPTModel                string `yaml:"ShouldRespondGPTModel"`
 }
 
 func (c *conf) getConf() *conf {
@@ -52,6 +57,8 @@ func (c *conf) getConf() *conf {
 
 var c conf
 var prevMsgs []string
+var mutex sync.Mutex
+var messagesSinceLastMessageWithoutBeingPrompted = 5
 
 func main() {
 	c.getConf()
@@ -81,73 +88,89 @@ func main() {
 		}
 	})
 	conn.AddCallback("PRIVMSG", func(event *irc.Event) {
-		checkMsgs := append(prevMsgs, event.Nick+": "+event.Message())
-		shouldIRespond := shouldIRespond(checkMsgs)
+		eventCopy := *event
 
-		if shouldIRespond {
-			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
-			input := strings.Join(prevMsgs, "\n")
-			input += "\n" + c.BotName + ": "
-			fmt.Println("Input for response:", input)
-			fmt.Println("")
+		go func() {
+			checkMsgs := append(prevMsgs, eventCopy.Nick+": "+eventCopy.Message())
+			shouldIRespond := shouldIRespond(checkMsgs)
 
-			// More expensive, more accurate
-			//response, err := chatgptResponse(c.BotContext, input, "gpt-4")
+			if shouldIRespond {
+				mutex.Lock()
+				prevMsgs = append(prevMsgs, eventCopy.Nick+": "+eventCopy.Message())
+				mutex.Unlock()
+				input := strings.Join(prevMsgs, "\n")
+				input += "\n" + c.BotName + ": "
+				fmt.Println("Input for response:", input)
+				fmt.Println("")
 
-			// Less expensive
-			response, err := chatgptResponse(c.BotContext, input, "gpt-3.5-turbo")
-			if err != nil {
-				fmt.Println("Error getting chatgpt response:", err)
-				return
-			}
+				// More expensive, more accurate
+				//response, err := chatgptResponse(c.BotContext, input, "gpt-4")
 
-			// Break response on line break
-			responses := strings.Split(response, "\n")
+				// Less expensive
+				response, err := chatgptResponse(c.BotContext, input, "gpt-3.5-turbo")
+				if err != nil {
+					fmt.Println("Error getting chatgpt response:", err)
+					return
+				}
 
-			for _, line := range responses {
-				if line != "" {
-					// Strip leading spaces from response
-					line = strings.TrimLeft(line, " ")
-					// If the line begins with the bot name, remove it
-					if strings.HasPrefix(line, c.BotName+": ") {
-						line = strings.TrimPrefix(line, c.BotName+": ")
-					}
+				// Break response on line break
+				responses := strings.Split(response, "\n")
 
-					// Add a random delay between 0 and 2 seconds before sending response
-					// time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+				for _, line := range responses {
+					if line != "" {
+						// Strip leading spaces from response
+						line = strings.TrimLeft(line, " ")
+						// If the line begins with the bot name, remove it
+						if strings.HasPrefix(line, c.BotName+": ") {
+							line = strings.TrimPrefix(line, c.BotName+": ")
+						}
 
-					// If line is > 384 characters, split it into multiple messages on word boundaries
-					if len(line) > 384 {
-						words := strings.Split(line, " ")
-						var msg string
-						for _, word := range words {
-							if len(msg)+len(word) > 384 {
-								conn.Privmsg(c.ChatRoom, msg)
-								prevMsgs = append(prevMsgs, c.BotName+": "+msg)
-								msg = word + " "
-							} else {
-								msg += word + " "
+						// Add a random delay between 0 and 2 seconds before sending response
+						// time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+
+						// If line is > 384 characters, split it into multiple messages on word boundaries
+						if len(line) > 384 {
+							words := strings.Split(line, " ")
+							var msg string
+							for _, word := range words {
+								if len(msg)+len(word) > 384 {
+									conn.Privmsg(c.ChatRoom, msg)
+									mutex.Lock()
+									prevMsgs = append(prevMsgs, c.BotName+": "+msg)
+									mutex.Unlock()
+									msg = word + " "
+								} else {
+									msg += word + " "
+								}
 							}
+							// Send the remaining part of the message, if there is any.
+							if msg != "" {
+								conn.Privmsg(c.ChatRoom, msg)
+								mutex.Lock()
+								prevMsgs = append(prevMsgs, c.BotName+": "+msg)
+								mutex.Unlock()
+							}
+						} else {
+							conn.Privmsg(c.ChatRoom, line)
+							mutex.Lock()
+							prevMsgs = append(prevMsgs, c.BotName+": "+line)
+							mutex.Unlock()
 						}
-						// Send the remaining part of the message, if there is any.
-						if msg != "" {
-							conn.Privmsg(c.ChatRoom, msg)
-							prevMsgs = append(prevMsgs, c.BotName+": "+msg)
-						}
-					} else {
-						conn.Privmsg(c.ChatRoom, line)
-						prevMsgs = append(prevMsgs, c.BotName+": "+line)
 					}
 				}
-			}
 
-		} else {
-			prevMsgs = append(prevMsgs, event.Nick+": "+event.Message())
-		}
-		// if prevMgs is longer than memory buffer, remove the first element (limited memory)
-		if len(prevMsgs) > c.MemorySize {
-			prevMsgs = prevMsgs[1:]
-		}
+			} else {
+				mutex.Lock()
+				prevMsgs = append(prevMsgs, eventCopy.Nick+": "+eventCopy.Message())
+				mutex.Unlock()
+			}
+			// if prevMgs is longer than memory buffer, remove the first element (limited memory)
+			if len(prevMsgs) > c.MemorySize {
+				mutex.Lock()
+				prevMsgs = prevMsgs[1:]
+				mutex.Unlock()
+			}
+		}()
 	})
 	conn.Loop()
 }
@@ -165,8 +188,8 @@ type Message struct {
  */
 func shouldIRespond(checkMsgs []string) bool {
 	numMsgs := len(checkMsgs)
-	numToJoin := 5
-	if numMsgs < 5 {
+	numToJoin := c.ContextLinesForResponseDetermination
+	if numMsgs < numToJoin {
 		numToJoin = numMsgs
 	}
 
@@ -174,16 +197,37 @@ func shouldIRespond(checkMsgs []string) bool {
 	fmt.Println("Checking to see if I should respond to:", lastMsgs)
 	fmt.Println("")
 
-	roleText := `You are ` + c.BotName + `, a participant in a chat room.
-	Based on the following series of messages, give me a boolean indicating if you SHOULD respond to the last message in the stream.
-	If your name was mentioned, but it seems like you should not respond based on context, return false.
-	Give the a response in JSON format like follows:
-	{ shouldRespond: boolean, respondReason: string }
+	// Randomly, with a 1 in 10 change, the bot has a higher chance to respond to the conversation
+	// Unless it has already had that happen in the last 5 messages...
+	rand.Seed(time.Now().UnixNano())
+	number := rand.Intn(10) + 1
 
-	shouldRespond is the boolean that indicates if ` + c.BotName + ` should respond.
-	respondReason is the reasoning behind the boolean.`
+	roleText := ""
+	if number == 1 && messagesSinceLastMessageWithoutBeingPrompted > 5 {
+		messagesSinceLastMessageWithoutBeingPrompted = 0
+		roleText = `You are ` + c.BotName + `, a participant in a chat room.
+		Based on the following series of messages, give me a boolean indicating if you SHOULD respond to the last message in the stream.
+		If your name was mentioned, but it seems like you should not respond based on context, return false. Even if you are not mentioned, if it seems like the conversation is a topic you would talk about, return true.
+		Give the a response in validJSON format like follows:
+		{ "shouldRespond": boolean, "respondReason": string }
 
-	jsonResponse, err1 := chatgptResponse(roleText, lastMsgs, "gpt-3.5-turbo")
+		shouldRespond is the boolean that indicates if ` + c.BotName + ` should respond.
+		respondReason is the reasoning behind the boolean.`
+
+	} else {
+		messagesSinceLastMessageWithoutBeingPrompted += 1
+
+		roleText = `You are ` + c.BotName + `, a participant in a chat room.
+		Based on the following series of messages, give me a boolean indicating if you SHOULD respond to the last message in the stream.
+		If your name was mentioned, but it seems like you should not respond based on context, return false.
+		Give the a response in validJSON format like follows:
+		{ "shouldRespond": boolean, "respondReason": string }
+
+		shouldRespond is the boolean that indicates if ` + c.BotName + ` should respond.
+		respondReason is the reasoning behind the boolean.`
+	}
+
+	jsonResponse, err1 := chatgptResponse(roleText, lastMsgs, c.ShouldRespondGPTModel)
 	if err1 != nil {
 		fmt.Println("Error getting chatgpt response in shouldIRespond:", err1)
 		return false
@@ -208,7 +252,7 @@ func shouldIRespond(checkMsgs []string) bool {
 // The api key in config.yml to grant.s.dial@gmail.com account and will expire on June 1st, 2023
 func chatgptResponse(roleText string, input string, model string) (string, error) {
 	data := map[string]interface{}{
-		"model": "gpt-4",
+		"model": c.ResponseGPTModel,
 		"messages": []Message{
 			{
 				Role:    "system",
@@ -228,7 +272,7 @@ func chatgptResponse(roleText string, input string, model string) (string, error
 		return "", err
 	}
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 15 * time.Second,
 	}
 	req, err := http.NewRequest("POST", chatgptURL, bytes.NewBuffer(payload))
 	if err != nil {
@@ -271,9 +315,16 @@ func chatgptResponse(roleText string, input string, model string) (string, error
 	if err != nil {
 		return "", err
 	}
+
+	// Sometimes, randomly, chatGPT wraps the JSON in markdown, so we have to remove it
+	bodyString := string(body)
+	bodyString = strings.Replace(bodyString, "```json", "", -1)
+	bodyString = strings.Replace(bodyString, "```", "", -1)
+	body = []byte(bodyString)
+
 	err = json.Unmarshal(body, &response)
 	if err != nil {
-		fmt.Println("Error in unmarshalling response")
+		fmt.Println("Error in unmarshalling response:", err)
 		return "", err
 	}
 
